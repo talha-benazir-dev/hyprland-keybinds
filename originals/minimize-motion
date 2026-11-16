@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Glide a floating window toward the dock, then use Omarchy's normal minimize.
+if [[ -n ${1:-} ]]; then
+  address=$1
+else
+  address=$(hyprctl -j activewindow | jq -r '.address // empty')
+fi
+[[ $address =~ ^0x[[:xdigit:]]+$ ]] || exit 1
+
+# A repeat click or keypress must not capture a position mid-animation.
+exec 9>"${XDG_RUNTIME_DIR:?}/omarchy-minimize-motion.lock"
+flock -n 9 || exit 0
+
+window=$(hyprctl -j clients | jq -ce --arg a "$address" '.[] | select(.address == $a)') || exit 1
+if ! jq -e '.visible and .floating and (.fullscreen == 0) and (.pinned == false)
+    and (.tags | index("omarchy-floating-workspace") != null)' <<< "$window" >/dev/null ||
+   ! hyprctl -j getoption animations:enabled | jq -e '.bool == true' >/dev/null; then
+  exec omarchy-hyprland-window-minimize "$address"
+fi
+
+read -r x y < <(jq -r '.at | @tsv' <<< "$window")
+[[ $x =~ ^-?[0-9]+$ && $y =~ ^-?[0-9]+$ ]] || exec omarchy-hyprland-window-minimize "$address"
+
+dock_position=$(jq -r '.dock.position // "bottom"' "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json" 2>/dev/null)
+dx=0 dy=0
+case "$dock_position" in
+  top) dy=-120 ;;
+  left) dx=-120 ;;
+  right) dx=120 ;;
+  *) dy=120 ;;
+esac
+
+move_window() {
+  [[ $(hyprctl dispatch "hl.dsp.window.move({ window = \"address:$address\", x = $1, y = $2, relative = $3 })") == ok ]]
+}
+
+if ! move_window "$dx" "$dy" true; then
+  exec omarchy-hyprland-window-minimize "$address"
+fi
+trap 'move_window "$x" "$y" false || true' EXIT
+sleep 0.13
+omarchy-hyprland-window-minimize "$address" || exit
+# Let Hyprland finish the workspace-move fade before resetting the hidden window.
+sleep 0.23
